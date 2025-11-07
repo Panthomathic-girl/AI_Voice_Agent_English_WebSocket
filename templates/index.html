@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Agent Chat</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .input-group {
+            margin-bottom: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+        select {
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+            width: 150px;
+        }
+        button {
+            padding: 12px 30px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .response-container {
+            margin-top: 20px;
+            padding: 20px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            min-height: 100px;
+            border: 1px solid #dee2e6;
+        }
+        .streaming-text {
+            color: #333;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+        .support-message {
+            margin-top: 15px;
+            padding: 15px;
+            background-color: #e7f3ff;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+        }
+        .options {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .option-btn {
+            padding: 8px 16px;
+            background-color: #28a745;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .option-btn:hover {
+            background-color: #218838;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .status.streaming {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+        .status.complete {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        audio {
+            margin-top: 10px;
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📡 Voice Agent Chat</h1>
+        <p>Select microphone, STT, LLM, and TTS modes, then speak to interact.</p>
+        
+        <div class="input-group">
+            <select id="micSelect">
+                <option value="">Select Microphone</option>
+            </select>
+            <select id="sttSelect">
+                <option value="local">Local Whisper (Offline)</option>
+                <option value="groq">Groq Whisper (Online)</option>
+            </select>
+            <select id="llmSelect">
+                <option value="gemini">Gemini (Google)</option>
+                <option value="groq">Groq (Llama3)</option>
+            </select>
+            <select id="ttsSelect">
+                <option value="gtts">gTTS (Simple)</option>
+                <option value="coqui">Coqui (Voice Cloning)</option>
+                <option value="kokoro">Kokoro (Realistic)</option>
+            </select>
+            <button id="recordBtn" onclick="startRecording()">Record & Send</button>
+        </div>
+
+        <div class="status" id="status" style="display: none;"></div>
+
+        <div class="response-container">
+            <div class="streaming-text" id="response">
+                Transcription and response will appear here...
+            </div>
+            <div id="supportMessage"></div>
+            <audio id="audioPlayer" controls></audio>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://127.0.0.1:8000/voice_agent';
+        let mediaRecorder;
+        let audioChunks = [];
+
+        // Populate microphone list
+        async function populateMics() {
+            const micSelect = document.getElementById('micSelect');
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                micSelect.innerHTML = '<option value="">Select Microphone</option>';
+                devices.forEach(device => {
+                    if (device.kind === 'audioinput') {
+                        const option = document.createElement('option');
+                        option.value = device.deviceId;
+                        option.text = device.label || `Microphone ${device.deviceId}`;
+                        micSelect.appendChild(option);
+                    }
+                });
+            } catch (err) {
+                console.error('Error listing microphones:', err);
+                micSelect.innerHTML = '<option value="">Error listing mics</option>';
+            }
+        }
+
+        // Initialize mic list on load
+        window.onload = populateMics;
+
+        function setStatus(message, type) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = 'status ' + type;
+            statusEl.style.display = 'block';
+        }
+
+        function clearStatus() {
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'none';
+        }
+
+        async function startRecording() {
+            const micId = document.getElementById('micSelect').value;
+            const sttMode = document.getElementById('sttSelect').value;
+            const llmMode = document.getElementById('llmSelect').value;
+            const ttsMode = document.getElementById('ttsSelect').value;
+            if (!micId) {
+                alert('Please select a microphone.');
+                return;
+            }
+            if (!sttMode || !llmMode || !ttsMode) {
+                alert('Please select STT, LLM, and TTS modes.');
+                return;
+            }
+
+            const recordBtn = document.getElementById('recordBtn');
+            recordBtn.disabled = true;
+            setStatus('Recording... Speak now!', 'streaming');
+            audioChunks = [];
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: micId } });
+                mediaRecorder = new MediaRecorder(stream);
+                mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                    const formData = new FormData();
+                    formData.append('file', audioBlob, 'input.wav');
+                    try {
+                        const res = await fetch(`${API_BASE}/upload?stt_mode=${sttMode}&tts_mode=${ttsMode}&llm_mode=${llmMode}`, { method: 'POST', body: formData });
+                        if (res.ok) {
+                            const data = await res.json();
+                            document.getElementById('response').textContent = `Transcription: ${data.transcription}\nResponse: ${data.response}`;
+                            const audioBlob = new Blob([hexToBytes(data.audio)], { type: 'audio/mp3' });
+                            document.getElementById('audioPlayer').src = URL.createObjectURL(audioBlob);
+                            document.getElementById('audioPlayer').play();
+                            displaySupportMessage(data.supportMessage);
+                            setStatus('Playing response...', 'complete');
+                        } else {
+                            const errorText = await res.text();
+                            setStatus('Error: ' + errorText, 'error');
+                            document.getElementById('response').textContent = errorText;
+                        }
+                    } catch (err) {
+                        setStatus('Upload failed: ' + err.message, 'error');
+                        document.getElementById('response').textContent = 'Upload failed: ' + err.message;
+                    }
+                    stream.getTracks().forEach(track => track.stop());
+                    recordBtn.disabled = false;
+                };
+                mediaRecorder.start();
+                setTimeout(() => mediaRecorder.stop(), 5000); // 5s recording
+            } catch (err) {
+                setStatus('Recording failed: ' + err.message, 'error');
+                document.getElementById('response').textContent = 'Recording failed: ' + err.message;
+                recordBtn.disabled = false;
+            }
+        }
+
+        function displaySupportMessage(supportMessage) {
+            const supportDiv = document.getElementById('supportMessage');
+            let html = '<div class="support-message">';
+            if (supportMessage.label) {
+                html += `<p><strong>${supportMessage.label}</strong></p>`;
+            }
+            if (supportMessage.options && supportMessage.options.length > 0) {
+                html += '<div class="options">';
+                supportMessage.options.forEach(option => {
+                    html += `<button class="option-btn" onclick="selectOption('${option}')">${option}</button>`;
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+            supportDiv.innerHTML = html;
+        }
+
+        function selectOption(option) {
+            if (option === "Record Again") {
+                startRecording();
+            }
+        }
+
+        function hexToBytes(hex) {
+            const bytes = [];
+            for (let i = 0; i < hex.length; i += 2) {
+                bytes.push(parseInt(hex.substr(i, 2), 16));
+            }
+            return new Uint8Array(bytes);
+        }
+    </script>
+</body>
+</html>
+
+<!-- <!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Agent Chat</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .input-group {
+            margin-bottom: 20px;
+        }
+        input[type="text"] {
+            width: 60%;
+            padding: 12px;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+        button {
+            padding: 12px 30px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-left: 10px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .response-container {
+            margin-top: 20px;
+            padding: 20px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            min-height: 100px;
+            border: 1px solid #dee2e6;
+        }
+        .streaming-text {
+            color: #333;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+        .support-message {
+            margin-top: 15px;
+            padding: 15px;
+            background-color: #e7f3ff;
+            border-radius: 5px;
+            border-left: 4px solid #007bff;
+        }
+        .options {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .option-btn {
+            padding: 8px 16px;
+            background-color: #28a745;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .option-btn:hover {
+            background-color: #218838;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .status.streaming {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+        .status.complete {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        audio {
+            margin-top: 10px;
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📡 Voice Agent Chat</h1>
+        <p>Speak into your mic (e.g., realme Buds T110) or type a query. Supports English/Hindi.</p>
+        
+        <div class="input-group">
+            <input type="text" id="queryInput" placeholder="Enter your query (English or Hindi)..." />
+            <button id="recordBtn" onclick="startRecording()">Record & Send</button>
+            <button id="streamBtn" onclick="sendQuery()">Stream Response</button>
+        </div>
+
+        <div class="status" id="status" style="display: none;"></div>
+
+        <div class="response-container">
+            <div class="streaming-text" id="response">
+                Response will appear here...
+            </div>
+            <div id="supportMessage"></div>
+            <audio id="audioPlayer" controls></audio>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://127.0.0.1:8000/voice_agent';
+        let mediaRecorder;
+        let audioChunks = [];
+
+        function setStatus(message, type) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = 'status ' + type;
+            statusEl.style.display = 'block';
+        }
+
+        function clearStatus() {
+            const statusEl = document.getElementById('status');
+            statusEl.style.display = 'none';
+        }
+
+        async function startRecording() {
+            const recordBtn = document.getElementById('recordBtn');
+            recordBtn.disabled = true;
+            setStatus('Recording... Speak now!', 'streaming');
+            audioChunks = [];
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                mediaRecorder.ondataavailable = e => audioChunks.push(e.data);
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+                    const formData = new FormData();
+                    formData.append('file', audioBlob, 'input.wav');
+                    try {
+                        const res = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
+                        if (res.ok) {
+                            const audioUrl = URL.createObjectURL(await res.blob());
+                            document.getElementById('audioPlayer').src = audioUrl;
+                            document.getElementById('audioPlayer').play();
+                            setStatus('Playing response...', 'complete');
+                        } else {
+                            const errorText = await res.text();
+                            setStatus('Error: ' + errorText, 'error');
+                            document.getElementById('response').textContent = errorText;
+                        }
+                    } catch (err) {
+                        setStatus('Upload failed: ' + err.message, 'error');
+                        document.getElementById('response').textContent = 'Upload failed: ' + err.message;
+                    }
+                    stream.getTracks().forEach(track => track.stop());
+                    recordBtn.disabled = false;
+                };
+                mediaRecorder.start();
+                setTimeout(() => mediaRecorder.stop(), 5000); // 5s recording
+            } catch (err) {
+                setStatus('Recording failed: ' + err.message, 'error');
+                document.getElementById('response').textContent = 'Recording failed: ' + err.message;
+                recordBtn.disabled = false;
+            }
+        }
+
+        async function sendQuery() {
+            const query = document.getElementById('queryInput').value.trim();
+            if (!query) {
+                alert('Please enter a query');
+                return;
+            }
+
+            // Clear previous response
+            document.getElementById('response').textContent = '';
+            document.getElementById('supportMessage').innerHTML = '';
+            document.getElementById('audioPlayer').src = '';
+            setStatus('Streaming...', 'streaming');
+
+            // Disable buttons
+            const sendBtn = document.getElementById('streamBtn');
+            const recordBtn = document.getElementById('recordBtn');
+            sendBtn.disabled = true;
+            recordBtn.disabled = true;
+
+            try {
+                const encodedQuery = encodeURIComponent(query);
+                const url = `${API_BASE}/stream?query=${encodedQuery}&top_k=5`;
+                const eventSource = new EventSource(url);
+                let fullResponse = '';
+
+                eventSource.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'text_chunk') {
+                        fullResponse += data.chunk;
+                        document.getElementById('response').textContent = fullResponse;
+                    } else if (data.type === 'audio') {
+                        const audioBlob = new Blob([hexToBytes(data.data)], { type: 'audio/mp3' });
+                        document.getElementById('audioPlayer').src = URL.createObjectURL(audioBlob);
+                        document.getElementById('audioPlayer').play();
+                        setStatus('Playing streamed audio...', 'complete');
+                    } else if (data.type === 'error') {
+                        document.getElementById('response').textContent = data.message;
+                        setStatus('Error: ' + data.message, 'error');
+                    } else if (data.supportMessage) {
+                        displaySupportMessage(data.supportMessage);
+                    }
+                    if (event.lastEventId === '[DONE]') {
+                        eventSource.close();
+                        setStatus('Complete!', 'complete');
+                    }
+                };
+
+                eventSource.onerror = () => {
+                    setStatus('Stream error.', 'error');
+                    document.getElementById('response').textContent = 'Stream error.';
+                    eventSource.close();
+                    sendBtn.disabled = false;
+                    recordBtn.disabled = false;
+                };
+            } catch (error) {
+                setStatus('Error: ' + error.message, 'error');
+                document.getElementById('response').textContent = 'Error: ' + error.message;
+                sendBtn.disabled = false;
+                recordBtn.disabled = false;
+            }
+        }
+
+        function displaySupportMessage(supportMessage) {
+            const supportDiv = document.getElementById('supportMessage');
+            let html = '<div class="support-message">';
+            if (supportMessage.label) {
+                html += `<p><strong>${supportMessage.label}</strong></p>`;
+            }
+            if (supportMessage.options && supportMessage.options.length > 0) {
+                html += '<div class="options">';
+                supportMessage.options.forEach(option => {
+                    html += `<button class="option-btn" onclick="selectOption('${option}')">${option}</button>`;
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+            supportDiv.innerHTML = html;
+        }
+
+        function selectOption(option) {
+            document.getElementById('queryInput').value = option;
+            sendQuery();
+        }
+
+        function hexToBytes(hex) {
+            const bytes = [];
+            for (let i = 0; i < hex.length; i += 2) {
+                bytes.push(parseInt(hex.substr(i, 2), 16));
+            }
+            return new Uint8Array(bytes);
+        }
+
+        // Allow Enter key to send query
+        document.getElementById('queryInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendQuery();
+            }
+        });
+    </script>
+</body>
+</html> -->
